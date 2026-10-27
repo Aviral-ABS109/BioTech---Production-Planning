@@ -1,0 +1,7 @@
+node_modules/
+dist/
+ZET-debug.log
+*.log
+.DS_Store
+# client data — keep out of the repo
+sample-data/Oct26_Demand_Plan_client.xlsx

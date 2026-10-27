@@ -1,0 +1,23 @@
+{
+  "name": "demand-collection-widget-v2",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "pack": "npm run build && zet validate && zet pack"
+  },
+  "dependencies": {
+    "jszip": "3.10.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
+    "jsdom": "25.0.1",
+    "vite": "5.4.11",
+    "vitest": "2.1.8"
+  }
+}

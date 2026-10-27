@@ -1,0 +1,51 @@
+{
+  "planningTypes": [
+    "IOL",
+    "Strips",
+    "Blade",
+    "Injector",
+    "Solution",
+    "CTR",
+    "IRIS"
+  ],
+  "sites": [
+    {
+      "Site_Name": "1100",
+      "types": [
+        "IOL",
+        "Strips",
+        "Blade",
+        "Injector",
+        "CTR",
+        "IRIS"
+      ]
+    },
+    {
+      "Site_Name": "2100",
+      "types": [
+        "Solution"
+      ]
+    },
+    {
+      "Site_Name": "5100",
+      "types": [
+        "IOL"
+      ]
+    },
+    {
+      "Site_Name": "7100",
+      "types": [
+        "Solution"
+      ]
+    }
+  ],
+  "markets": [
+    "Morocco",
+    "Egypt",
+    "Brazil",
+    "Colombia",
+    "Turkey",
+    "Iberia",
+    "India"
+  ]
+}
