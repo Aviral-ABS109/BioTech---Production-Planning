@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readSheet } from '../src/lib/xlsxReader.js';
 import { rowsToDemand } from '../src/lib/parseDemand.js';
-import { buildMasterIndex, validateRows, fileErrors, existingKeys, summarise, parseQty } from '../src/lib/validate.js';
+import { buildMasterIndex, validateRows, fileErrors, existingKeys, summarise, parseQty, similarCountry } from '../src/lib/validate.js';
 import seed from '../src/api/mockSeed.json';
 
 let n = 1;
@@ -43,18 +43,42 @@ describe('validateRows (one record per FG code + country)', () => {
       line({ excelRow: 10, plant: '2100', fg1: 'B' }),
       line({ excelRow: 11, type: 'Unknown', fg1: 'C' }),
       line({ excelRow: 12, fg1: '' }),
-      line({ excelRow: 13, range: 'High', fg1: 'D' }),
+      line({ excelRow: 13, range: 'H'.repeat(300), fg1: 'D' }),
       line({ excelRow: 14, power: 'abc', fg1: 'E' }),
-      line({ excelRow: 15, country: 'Japan', fg1: 'F' }),
+      line({ excelRow: 15, country: 'Moroco', fg1: 'F' }),
     ], index, { cycle: C });
     expect(out.map((v) => v.status)).toEqual(Array(8).fill('error'));
     expect(out[0].errors).toContain('Plant "9999" is not in Sites');
     expect(out[2].errors).toContain('Type "IOL" is not set up for plant 2100 in Sites');
     expect(out[3].errors).toContain('Type "Unknown" is not a planning type');
     expect(out[4].errors).toContain('FG Code 1 is missing');
-    expect(out[5].errors[0]).toMatch(/Range "High" must be one of/);
+    expect(out[5].errors[0]).toMatch(/Range is longer than 255/);
     expect(out[6].errors).toContain('Power "abc" is not a number');
-    expect(out[7].errors).toContain('Country "Japan" is not in the country master');
+    expect(out[7].errors[0]).toMatch(/Country "Moroco" is not in the country master\. Did you mean Morocco\?/);
+  });
+
+  it('Range accepts any value; known ones keep one spelling', () => {
+    const out = validateRows([line({ excelRow: 20, range: 'Medium', fg1: 'R1' }), line({ excelRow: 21, range: 'low', fg1: 'R2' })], index, { cycle: C });
+    expect(out.map((v) => v.status)).toEqual(['ok', 'ok']);
+    expect(out.map((v) => v.payload.Range)).toEqual(['Medium', 'Low']);
+  });
+
+  it('misspellings are caught, genuinely new names are not', () => {
+    for (const [name, near] of [['Inida', 'India'], ['Brasil', 'Brazil'], ['Moroco', 'Morocco'], ['Turky', 'Turkey'], ['Colombiaa', 'Colombia']]) {
+      expect(similarCountry(name, index), name).toBe(near);
+    }
+    for (const name of ['Kenya', 'Japan', 'Peru', 'Chile', 'Oman']) expect(similarCountry(name, index), name).toBeNull();
+  });
+
+  it('a country that is not in the master is added on save (Active)', () => {
+    const out = validateRows(fg({ fg1: 'NEW' }, [['Kenya', { x3: 5 }], ['kenya ', {}], ['Morocco', {}]]), index, { cycle: C });
+    expect(out.map((v) => v.status)).toEqual(['error', 'error', 'error']); // Kenya twice in one FG code = duplicate → whole FG code held
+    const ok = validateRows(fg({ fg1: 'NEW2' }, [['Kenya', { x3: 5 }], ['Morocco', {}]]), index, { cycle: C });
+    expect(ok.map((v) => v.status)).toEqual(['ok', 'ok']);
+    expect(ok[0].newCountry).toBe('Kenya');
+    expect(ok[0].payload.Country).toBeNull(); // filled in after the country is created
+    expect(ok[0].warnings[0]).toMatch(/New country "Kenya"/);
+    expect(summarise(ok)).toMatchObject({ newCountryRows: 1, newCountries: [{ name: 'Kenya', rows: 1 }] });
   });
 
   it('one bad country row blocks the other rows of the same FG code', () => {
@@ -108,7 +132,7 @@ describe('client data end to end', () => {
     expect(first(2)).toBe('Plant "9100" is not in Sites');
     expect(first(10)).toBe('Egypt 3X: negative quantity (-20)');
     expect(first(17)).toBe('Egypt 2X: "abc" is not a number');
-    expect(first(24)).toBe('Country "Japan" is not in the country master');
+    expect(first(24)).toMatch(/Country "Inida" is not in the country master\. Did you mean India\?/);
     expect(first(31)).toBe('Duplicate of Excel row 30 (same Plant + FG Code 1 + Country)');
   });
 });

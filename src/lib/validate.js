@@ -4,7 +4,7 @@
 // on every country record of that FG code.
 // Status per line: 'ok' (will be saved) · 'skip' (already uploaded) · 'error'.
 // Pure functions — unit-tested in test/validate.test.js.
-import { F, RANGE_VALUES, DUPLICATE_POLICY, STATUS_VALIDATED, QTY_DECIMALS } from '../config.js';
+import { F, RANGE_VALUES, RANGE_MAX_LENGTH, DUPLICATE_POLICY, STATUS_VALIDATED, QTY_DECIMALS, AUTO_ADD_COUNTRIES } from '../config.js';
 import { normCycle } from './cycle.js';
 
 const norm = (s) => String(s ?? '').replace(/ /g, ' ').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -22,7 +22,7 @@ export function buildMasterIndex({ sites, planningTypes, markets }) {
   const typeById = new Map();
   const typeByName = new Map();
   for (const t of planningTypes) {
-    const rec = { id: String(t.ID), name: str(t[F.planningType.name]) };
+    const rec = { id: String(t.ID), name: str(t[F.planningType.name]), active: F.planningType.active ? isActive(t[F.planningType.active]) : true };
     typeById.set(rec.id, rec);
     if (rec.name) typeByName.set(norm(rec.name), rec);
   }
@@ -31,7 +31,8 @@ export function buildMasterIndex({ sites, planningTypes, markets }) {
   for (const s of sites) {
     const code = displayOf(s[F.site.code]);
     const types = asList(s[F.site.types]).map((t) => typeById.get(idOf(t))?.name || displayOf(t));
-    const rec = { id: String(s.ID), code, types: types.map(norm), typeNames: types };
+    const typeIds = asList(s[F.site.types]).map(idOf);
+    const rec = { id: String(s.ID), code, types: types.map(norm), typeNames: types, typeIds, active: F.site.active ? isActive(s[F.site.active]) : true };
     siteById.set(rec.id, rec);
     if (code) siteByCode.set(norm(code), rec);
   }
@@ -90,6 +91,46 @@ export function existingKeys(demands, index) {
   return new Set(demands.map((d) => dupKey(displayOf(d[D.cycle]), recordPlant(d, index), str(d[D.fg1]), recordCountry(d, index))));
 }
 
+/** Edit distance with swapped letters counting as one edit (spots "Inida" → India). */
+export function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[m][n];
+}
+
+/** Existing country this unknown name is probably a misspelling of (or null). */
+export function similarCountry(name, index) {
+  const n = norm(name).replace(/[^a-z]/g, '');
+  if (!n) return null;
+  let best = null;
+  for (const m of index.marketByName.values()) {
+    const e = norm(m.name).replace(/[^a-z]/g, '');
+    if (!e) continue;
+    const d = editDistance(n, e);
+    const limit = Math.max(1, Math.min(2, Math.floor(Math.min(n.length, e.length) / 3)));
+    if (n === e || d <= limit || (n.length >= 4 && (e.startsWith(n) || n.startsWith(e)))) {
+      if (!best || d < best.d) best = { d, name: m.name };
+    }
+  }
+  return best?.name ?? null;
+}
+
+/** How an unknown country name is treated: { similar } → error, { add } → created on save. */
+export function unknownCountry(name, index) {
+  const similar = similarCountry(name, index);
+  if (similar) return { error: `Country "${name}" is not in the country master. Did you mean ${similar}? Fix it in Excel.` };
+  if (!AUTO_ADD_COUNTRIES) return { error: `Country "${name}" is not in the country master` };
+  return { add: String(name).trim().replace(/\s+/g, ' ') };
+}
+
 /** Problems with the file as a whole. */
 export function fileErrors(parsed, index) {
   const errors = [...(parsed.layoutErrors || [])];
@@ -97,7 +138,10 @@ export function fileErrors(parsed, index) {
     for (const c of parsed.countries || []) {
       if (!c.name) continue;
       const m = index.marketByName.get(norm(c.name));
-      if (!m) errors.push(`Country "${c.name}" (columns ${c.columns}) is not in the country master.`);
+      if (!m) {
+        const u = unknownCountry(c.name, index);
+        if (u.error) errors.push(`${u.error} (columns ${c.columns})`);
+      }
       else if (!m.active) errors.push(`Country "${c.name}" is inactive in the country master.`);
     }
   }
@@ -126,16 +170,24 @@ export function validateRows(lines, index, { cycle, existing = new Set(), fileEr
       errors.push(`Type "${type.name}" is not set up for plant ${site.code} in Sites`);
     }
     const market = l.country ? index.marketByName.get(norm(l.country)) : null;
+    let newCountry = null;
     if (!l.country) errors.push('Country is missing');
-    else if (!market) errors.push(`Country "${l.country}" is not in the country master`);
-    else if (!market.active) errors.push(`Country "${l.country}" is inactive`);
+    else if (!market) {
+      const u = unknownCountry(l.country, index);
+      if (u.error) errors.push(u.error);
+      else {
+        newCountry = u.add;
+        warnings.push(`New country "${u.add}" — will be added to the Country master (Active) when saved`);
+      }
+    } else if (!market.active) errors.push(`Country "${l.country}" is inactive — activate it in Masters → Countries`);
 
     if (!l.fg1) errors.push('FG Code 1 is missing');
     if (!l.model) warnings.push('Model is blank');
     let range = '';
     if (l.range) {
-      range = RANGE_VALUES.find((v) => norm(v) === norm(l.range)) || '';
-      if (!range) errors.push(`Range "${l.range}" must be one of ${RANGE_VALUES.join(', ')}`);
+      // free text; known values keep one spelling
+      range = RANGE_VALUES.find((v) => norm(v) === norm(l.range)) || String(l.range).trim();
+      if (range.length > RANGE_MAX_LENGTH) errors.push(`Range is longer than ${RANGE_MAX_LENGTH} characters`);
     }
     const power = parsePower(l.power);
     if (power.error) errors.push(power.error);
@@ -150,7 +202,7 @@ export function validateRows(lines, index, { cycle, existing = new Set(), fileEr
     const dist = parseQty(l.dist, 'Dist. Shortages');
     if (dist.error) errors.push(dist.error);
 
-    return { line: l, site, type, market, range, power: power.value, q, dist: dist.value ?? 0, errors, warnings };
+    return { line: l, site, type, market, newCountry, range, power: power.value, q, dist: dist.value ?? 0, errors, warnings };
   });
 
   // 2. group by FG code: totals, duplicates, consistency
@@ -205,7 +257,8 @@ export function validateRows(lines, index, { cycle, existing = new Set(), fileEr
     if (status === 'ok') {
       payload = {
         [D.cycle]: cycle,
-        [D.country]: v.market.id,
+        // a new country gets its ID when it is created at save time
+        [D.country]: v.market ? v.market.id : null,
         [D.plant]: v.site.id,
         [D.type]: v.type.id,
         [D.model]: l.model,
@@ -233,6 +286,7 @@ export function validateRows(lines, index, { cycle, existing = new Set(), fileEr
       excelRow: l.excelRow,
       key: `${l.excelRow}|${l.country}`,
       status,
+      newCountry: v.newCountry,
       errors: v.errors,
       warnings: v.warnings,
       payload,
@@ -243,7 +297,7 @@ export function validateRows(lines, index, { cycle, existing = new Set(), fileEr
         fg1: l.fg1,
         power: v.power,
         cyl: l.cyl,
-        country: v.market?.name || l.country,
+        country: v.market?.name || v.newCountry || l.country,
         x3: v.q.x3,
         x2: v.q.x2,
         x1: v.q.x1,
@@ -258,11 +312,17 @@ export function validateRows(lines, index, { cycle, existing = new Set(), fileEr
 }
 
 export function summarise(validated) {
-  const s = { total: validated.length, ok: 0, skip: 0, error: 0, added: 0, failed: 0, warnings: 0, qty: 0, fgCodes: 0 };
+  const s = { total: validated.length, ok: 0, skip: 0, error: 0, added: 0, failed: 0, warnings: 0, qty: 0, fgCodes: 0, newCountryRows: 0, newCountries: [] };
   const fg = new Map();
+  const newC = new Map();
   for (const v of validated) {
     s[v.status] = (s[v.status] || 0) + 1;
-    if (v.warnings.some((w) => !w.startsWith('Already uploaded'))) s.warnings++;
+    if (v.newCountry && (v.status === 'ok' || v.status === 'added')) {
+      s.newCountryRows++;
+      const k = norm(v.newCountry);
+      newC.set(k, { name: newC.get(k)?.name || v.newCountry, rows: (newC.get(k)?.rows || 0) + 1 });
+    }
+    if (v.warnings.some((w) => !w.startsWith('Already uploaded') && !w.startsWith('New country'))) s.warnings++;
     if (v.status === 'ok') {
       s.qty += v.display.lineTotal;
       fg.set(`${v.display.plant}|${v.display.fg1}`, v.display.dist);
@@ -271,5 +331,6 @@ export function summarise(validated) {
   // Dist. Shortages counts once per FG code
   s.qty = round(s.qty + [...fg.values()].reduce((a, b) => a + b, 0));
   s.fgCodes = fg.size;
+  s.newCountries = [...newC.values()];
   return s;
 }

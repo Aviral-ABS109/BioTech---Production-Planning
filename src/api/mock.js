@@ -7,7 +7,9 @@ import { REPORTS, FORMS, F } from '../config.js';
 let nextId = 4100000000000001;
 const newId = () => String(nextId++);
 const lookup = (id, display) => ({ ID: String(id), display_value: display });
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// local testing only: localStorage.mockSlow = 10 makes every call 10× slower (to see loaders)
+const slow = () => { try { return Number(localStorage.getItem('mockSlow')) || 1; } catch { return 1; } };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms * slow()));
 
 export function createMockZoho() {
   const types = seed.planningTypes.map((n) => ({ ID: newId(), [F.planningType.name]: n }));
@@ -22,20 +24,22 @@ export function createMockZoho() {
     [REPORTS.markets]: seed.markets.map((n) => ({ ID: newId(), [F.market.name]: n, [F.market.active]: 'true' })),
     [REPORTS.demands]: [],
     [REPORTS.demandUploads]: [],
+    [REPORTS.sitePlanStatus]: [],
   };
   const byId = (report, id) => db[report].find((r) => r.ID === String(id));
   const files = {};
 
-  // supports "Field == value" joined by && (enough for the widget's queries)
+  // supports "Field == value" joined by && or || (one level of parentheses)
   function matches(rec, criteria) {
     if (!criteria) return true;
-    return criteria.split('&&').every((part) => {
-      const m = part.trim().replace(/^\(|\)$/g, '').match(/^(\w+)\s*==\s*"?([^"]*)"?$/);
+    const one = (part) => {
+      const m = part.trim().replace(/^\(+|\)+$/g, '').trim().match(/^(\w+)\s*==\s*"?([^"]*)"?$/);
       if (!m) return true;
       const v = rec[m[1]];
       const actual = v && typeof v === 'object' ? v.ID : String(v);
-      return actual === m[2];
-    });
+      return actual === m[2].trim();
+    };
+    return criteria.split('&&').every((p) => (p.includes('||') ? p.split('||').some(one) : one(p)));
   }
 
   function saveDemand(d) {
@@ -80,6 +84,29 @@ export function createMockZoho() {
         db[REPORTS.demandUploads].push(rec);
         return { code: 3000, result: [{ code: 3000, data: { ID: rec.ID }, message: 'success' }] };
       }
+      if (form_name === FORMS.sitePlanStatus) {
+        const d = { ...list[0] };
+        const site = byId(REPORTS.siteMaster, d[F.planStatus.site]);
+        if (!site) return { code: 3002, error: { alert_message: ['Site is mandatory'] } };
+        d[F.planStatus.site] = lookup(site.ID, site[F.site.code]);
+        const rec = { ID: newId(), ...d, Modified_Time: new Date().toISOString() };
+        db[REPORTS.sitePlanStatus].push(rec);
+        return { code: 3000, result: [{ code: 3000, data: { ID: rec.ID }, message: 'success' }] };
+      }
+      // master forms (only these link names exist in the mock, to exercise the fallbacks)
+      const master = { Site_Master: REPORTS.siteMaster, Planning_Type: REPORTS.planningTypes, Country: REPORTS.markets }[form_name];
+      if (master) {
+        const d = { ...list[0] };
+        if (master === REPORTS.siteMaster) {
+          d[F.site.types] = (d[F.site.types] || []).map((id) => lookup(id, byId(REPORTS.planningTypes, id)?.[F.planningType.name]));
+        }
+        if (master === REPORTS.markets && d[F.market.active] !== undefined) d[F.market.active] = String(d[F.market.active]);
+        const keyField = { [REPORTS.siteMaster]: F.site.code, [REPORTS.planningTypes]: F.planningType.name, [REPORTS.markets]: F.market.name }[master];
+        if (!String(d[keyField] ?? '').trim()) return { code: 3002, error: { alert_message: ['Enter a value for the name field'] } };
+        const rec = { ID: newId(), ...d };
+        db[master].push(rec);
+        return { code: 3000, result: [{ code: 3000, data: { ID: rec.ID }, message: 'success' }] };
+      }
       if (form_name === FORMS.demand) {
         const result = list.map((d) => {
           const r = saveDemand(d);
@@ -91,11 +118,45 @@ export function createMockZoho() {
       }
       return { code: 2945, message: `Unknown form ${form_name}` };
     },
+    async deleteRecordById({ report_name, id }) {
+      await wait(60);
+      const list = db[report_name] || [];
+      const i = list.findIndex((r) => r.ID === String(id));
+      if (i < 0) return { code: 3100, message: 'No records found' };
+      list.splice(i, 1);
+      return { code: 3000, message: 'success' };
+    },
+    async deleteRecords({ report_name, process_until_limit, payload }) {
+      await wait(150);
+      const list = db[report_name] || [];
+      const hit = list.filter((r) => matches(r, payload?.criteria));
+      if (!hit.length) return { code: 3100, message: 'No records found' };
+      if (hit.length > 200 && process_until_limit !== 'true') return { code: 3020, message: 'More than 200 records match' };
+      const now = hit.slice(0, 200);
+      for (const r of now) list.splice(list.indexOf(r), 1);
+      const res = { code: 3000, result: now.map((r) => ({ code: 3000, data: { ID: r.ID }, message: 'success' })) };
+      if (hit.length > 200) res.more_records = 'mock-more';
+      return res;
+    },
+    async invokeCustomApi({ api_name }) {
+      await wait(60);
+      if (api_name === 'get_current_user') return { code: 3000, result: { name: 'aviral.srivastava', email: 'aviral@local.test', role: 'Planner', profile: 'Administrator' } };
+      return { code: 3100, message: 'No such API' };
+    },
     async updateRecordById({ report_name, id, payload }) {
       await wait(80);
       const rec = byId(report_name, id);
       if (!rec) return { code: 3100, message: 'No records found' };
-      Object.assign(rec, payload.data);
+      const d = { ...payload.data };
+      if (report_name === REPORTS.siteMaster && d[F.site.types]) {
+        d[F.site.types] = d[F.site.types].map((tid) => lookup(tid, byId(REPORTS.planningTypes, tid)?.[F.planningType.name]));
+      }
+      if (report_name === REPORTS.markets && d[F.market.active] !== undefined) d[F.market.active] = String(d[F.market.active]);
+      if (report_name === REPORTS.demands) {
+        const decimals = (x) => (String(x).split('.')[1] || '').length;
+        for (const [k, v] of Object.entries(d)) if (typeof v === 'number' && decimals(v) > 2) return { code: 3002, error: { alert_message: [`${k} has exceeded its maximum digits.`] } };
+      }
+      Object.assign(rec, d);
       return { code: 3000, data: { ID: id }, message: 'success' };
     },
   };

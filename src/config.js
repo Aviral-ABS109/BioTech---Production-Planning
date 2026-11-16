@@ -10,6 +10,29 @@ export const APP_NAME = undefined; // undefined = the application the widget is 
 export const FORMS = {
   demand: 'Demand',
   demandUpload: 'Demand_Upload',
+  sitePlanStatus: 'Site_Plan_Status', // one record per planning cycle + site
+};
+
+// Master forms the widget adds records to (Masters section + new countries on upload).
+// Several link names may be listed: the first one the app accepts is used, so a
+// rename (Site Master → Sites, Market → Country) does not break the widget.
+export const MASTER_FORMS = {
+  site: ['Sites', 'Site_Master'],
+  planningType: ['Planning_Type'],
+  country: ['Country', 'Market'],
+};
+
+// Countries in an uploaded file that are not in the Country master are added
+// automatically (Active) when the demand is saved. Names that look like a
+// misspelling of an existing country are rejected instead.
+export const AUTO_ADD_COUNTRIES = true;
+
+// Logged-in user shown in the sidebar. The widget always knows the user's email;
+// name and role come from an optional custom API (Microservices → Custom API) that
+// returns { name, email, role, profile }. Set api_name to null to use the email only.
+export const USER_API = {
+  api_name: 'get_current_user',
+  public_key: null, // only if the custom API uses Public Key authentication
 };
 
 export const REPORTS = {
@@ -18,13 +41,15 @@ export const REPORTS = {
   markets: 'All_Countries', // Country master (was Market)
   demands: 'Demand_Report',
   demandUploads: 'Demand_Upload_Report',
+  sitePlanStatus: 'All_Site_Plan_Status',
 };
 
 export const F = {
   // Site Master: the field holding the plant code (1100, 2100…) and the
   // multi-select lookup of planning types
-  site: { code: 'Site_Name', types: 'Planning_Type' },
-  planningType: { name: 'Type_Name' },
+  // active: link name of an "Active" checkbox, or null if the form has none
+  site: { code: 'Site_Name', types: 'Planning_Type', active: null },
+  planningType: { name: 'Type_Name', active: null },
   market: { name: 'Country_Name', active: 'Active' }, // Country master fields
   // One Demand record = one FG code + one country (no subform).
   // Dist. Shortages and the X3/X2/X1/Zero totals are per FG code and repeated
@@ -54,6 +79,14 @@ export const F = {
     status: 'Status',
     upload: 'Demand_Upload', // lookup → Demand Upload form (set to null to skip linking)
   },
+  // Site Plan Status: where each site is in the planning process for a cycle
+  planStatus: {
+    cycle: 'Planning_Cycle', // single line, same text as Demand.Planning_Cycle
+    site: 'Site', // lookup → Sites
+    stage: 'Stage', // dropdown, values = PLAN_STAGES
+    updatedOn: 'Stage_Updated_On', // date-time (skipped automatically if the format is rejected)
+    updatedBy: 'Updated_By', // single line
+  },
   upload: {
     name: 'Upload_Name',
     cycle: 'Planning_Cycle', // single line; skipped automatically if it rejects text
@@ -68,15 +101,36 @@ export const F = {
   },
 };
 
+// Planning stages, in order (the client's process). Must match the Stage dropdown
+// options exactly. The last one means the site's plan is complete.
+export const PLAN_STAGES = [
+  'Demand Collection',
+  'Production Planning',
+  'Material Management',
+  'Capacity Calculation',
+  'Review & Approve',
+  'Proceed for Signoff',
+  'Signed Off',
+];
+// Short names for the tracker chips (same order)
+export const PLAN_STAGE_SHORT = ['Demand', 'Production', 'Material', 'Capacity', 'Review', 'Signoff', 'Signed off'];
+
 // Quantities are rounded to this many decimals before saving (must not exceed
 // the decimal places of the X3/X2/X1/Zero/Open_Orders/Dist/Total fields)
 export const QTY_DECIMALS = 2;
 
+// Demand Upload Status after all its records are deleted from Upload history
+// (add this option to the Status field if it is a dropdown)
+export const UPLOAD_DELETED = 'Deleted';
+
 // Value written to Demand.Status for rows that passed the checks
 export const STATUS_VALIDATED = 'Validated';
 
-// Allowed values of the Range dropdown (matched case-insensitively)
+// Range is a single-line field: any value is accepted. These known values are
+// matched case-insensitively and saved in this spelling ("low" → "Low"), and are
+// offered as suggestions when editing a record.
 export const RANGE_VALUES = ['Running', 'Low', 'NA'];
+export const RANGE_MAX_LENGTH = 255; // single-line field limit
 
 // Planning cycle text written to Planning_Cycle, built from the month + year
 // picked in the widget. 'MON\'YY' → OCT'26 · 'Mon YYYY' → Oct 2026 · 'MM-YYYY' → 10-2026

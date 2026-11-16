@@ -3,6 +3,7 @@ import { REPORTS, FORMS, F, BATCH_SIZE } from '../config.js';
 import { getAllRecords, addRecordsBatched, updateRecordById, uploadFile, getLoginUser } from '../api/creator.js';
 import { buildMasterIndex, displayOf, recordPlant, recordType, recordCountry } from './validate.js';
 import { sameCycle, yearFromCycle } from './cycle.js';
+import { createCountries } from './masterService.js';
 
 export async function loadMasters() {
   const [sites, planningTypes, markets] = await Promise.all([
@@ -43,7 +44,21 @@ export async function loadDemandsForCycle(cycle) {
  * Returns per-row results so the preview can show what happened to each row.
  */
 export async function runUpload({ file, cycle, validated, onProgress }) {
-  const toSend = validated.filter((v) => v.status === 'ok');
+  let toSend = validated.filter((v) => v.status === 'ok');
+  // 0. create countries that are new in this file (Active), then point their rows at them
+  const newNames = [...new Map(toSend.filter((v) => v.newCountry).map((v) => [v.newCountry.toLowerCase(), v.newCountry])).values()];
+  const created = newNames.length ? await createCountries(newNames) : new Map();
+  const countryFailed = [];
+  if (created.size) {
+    toSend = toSend.flatMap((v) => {
+      if (!v.newCountry) return [v];
+      const c = created.get(v.newCountry.trim().toLowerCase().replace(/\s+/g, ' '));
+      if (c?.id) return [{ ...v, payload: { ...v.payload, [F.demand.country]: c.id } }];
+      countryFailed.push({ key: v.key, excelRow: v.excelRow, country: v.display.country, ok: false, error: `Country "${v.newCountry}" could not be added: ${c?.error || 'unknown error'}` });
+      return [];
+    });
+  }
+  const addedCountries = [...created.values()].filter((c) => c.id).map((c) => c.name);
   const skipped = validated.filter((v) => v.status === 'skip').length;
   const blocked = validated.filter((v) => v.status === 'error').length;
   const U = F.upload;
@@ -72,7 +87,7 @@ export async function runUpload({ file, cycle, validated, onProgress }) {
   );
   const results = await addRecordsBatched(FORMS.demand, payloads, BATCH_SIZE, onProgress);
 
-  const rowResults = toSend.map((v, i) => ({ key: v.key, excelRow: v.excelRow, country: v.display.country, ...results[i] }));
+  const rowResults = [...toSend.map((v, i) => ({ key: v.key, excelRow: v.excelRow, country: v.display.country, ...results[i] })), ...countryFailed];
   const success = rowResults.filter((r) => r.ok).length;
   const failed = rowResults.filter((r) => !r.ok);
 
@@ -93,7 +108,7 @@ export async function runUpload({ file, cycle, validated, onProgress }) {
     }
   }
 
-  return { uploadId, sent: toSend.length, success, failed, skipped, blocked, rowResults };
+  return { uploadId, sent: toSend.length, success, failed, skipped, blocked, rowResults, addedCountries };
 }
 
 const num = (v) => {
